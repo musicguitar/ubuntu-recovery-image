@@ -5,6 +5,7 @@ import (
 	"io/ioutil"
 	"log"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -51,9 +52,8 @@ func setupLoopDevice(recoveryOutputFile string, recoveryNR string) (string, stri
 
 	rplib.Shellexec("parted", "-ms", "-a", "optimal", fmt.Sprintf("/dev/%s", recoveryImageLoop),
 		"unit", "MiB",
-		"mklabel", "gpt",
+		"mklabel", "msdos",
 		"mkpart", "primary", "fat32", fmt.Sprintf("%d", recoveryBegin), fmt.Sprintf("%d", recoveryEnd),
-		"name", recoveryNR, configs.Yaml.Recovery.FsLabel,
 		"set", recoveryNR, "boot", "on",
 		"print")
 
@@ -99,25 +99,12 @@ func setupInitrd(initrdImagePath string, tmpDir string) {
 	rplib.Shellexec("mount", kernelSnapPath, kernelsnapTmpDir)
 	defer syscall.Unmount(kernelsnapTmpDir, 0)
 
+	log.Printf("[copy kernel.img]")
+	rplib.Shellexec("cp", "-f", fmt.Sprintf("%s/kernel.img", kernelsnapTmpDir), fmt.Sprintf("%s/device/%s/", tmpDir, configs.Yaml.Recovery.FsLabel))
+
 	log.Printf("[unxz initrd in kernel snap]")
 	unxzInitrdCmd := fmt.Sprintf("unxz < %s/initrd.img | (cd %s; cpio -i )", kernelsnapTmpDir, initrdTmpDir)
 	_ = rplib.Shellcmdoutput(unxzInitrdCmd)
-
-	kerVer := rplib.Shellcmdoutput(fmt.Sprintf("basename %s/lib/modules/*", initrdTmpDir))
-
-	nlsModule := fmt.Sprintf("/lib/modules/%s/kernel/fs/nls/nls_iso8859-1.ko", kerVer)
-	if _, err := os.Stat(filepath.Join(initrdTmpDir, nlsModule)); os.IsNotExist(err) {
-		// nls module didn't exist in initrd.img
-		// try to copy from kernel snap
-		if _, err := os.Stat(filepath.Join(kernelsnapTmpDir, nlsModule)); err == nil {
-			err = os.MkdirAll(filepath.Dir(filepath.Join(initrdTmpDir, nlsModule)), 0755)
-			rplib.Checkerr(err)
-
-			rplib.Shellexec("cp", filepath.Join(kernelsnapTmpDir, nlsModule), filepath.Join(initrdTmpDir, nlsModule))
-			rplib.Shellexec("depmod", "-a", "-b", initrdTmpDir, kerVer)
-			_ = rplib.Shellcmdoutput(fmt.Sprintf("rm -f %s/lib/modules/*/modules.*map", initrdTmpDir))
-		}
-	}
 
 	log.Printf("[modify initrd ORDER file]")
 	orderFile := fmt.Sprintf("%s/scripts/local-premount/ORDER", initrdTmpDir)
@@ -230,23 +217,10 @@ func createRecoveryImage(recoveryNR string, recoveryOutputFile string, buildstam
 
 	log.Printf("[deploy default efi bootdir]")
 
-	rplib.Shellexec("cp", "-ar", fmt.Sprintf("%s/image/system-boot/efi", tmpDir), recoveryDir)
-	err = os.Remove(fmt.Sprintf("%s/efi/ubuntu/grub/grubenv", recoveryDir))
-	rplib.Checkerr(err)
+	rplib.Shellexec("rsync", "-aAX", "--exclude=*.snap", fmt.Sprintf("%s/image/system-boot/", tmpDir), recoveryDir)
 
-	log.Printf("[create grubenv for switching between core and recovery system]")
-	rplib.Shellexec("grub-editenv", fmt.Sprintf("%s/efi/ubuntu/grub/grubenv", recoveryDir), "create")
-	rplib.Shellexec("grub-editenv", fmt.Sprintf("%s/efi/ubuntu/grub/grubenv", recoveryDir), "set", "firstfactoryrestore=no")
-	rplib.Shellexec("grub-editenv", fmt.Sprintf("%s/efi/ubuntu/grub/grubenv", recoveryDir), "set", fmt.Sprintf("recoverylabel=%s", configs.Yaml.Recovery.FsLabel))
-
-	rplib.Shellexec("grub-editenv", fmt.Sprintf("%s/efi/ubuntu/grub/grubenv", recoveryDir), "set", "recoverytype=factory_install")
-
-	log.Printf("[setup recovery uuid]")
-	recoveryUUID := rplib.Shellexecoutput("blkid", recoveryMapperDevice, "-o", "value", "-s", "UUID")
-	rplib.Shellexec("grub-editenv", fmt.Sprintf("%s/efi/ubuntu/grub/grubenv", recoveryDir), "set", fmt.Sprintf("recoveryuuid=%s", recoveryUUID))
-
-	log.Printf("[create/overwrite grub.cfg]")
-	rplib.Shellexec("cp", "-f", "data/grub.cfg", fmt.Sprintf("%s/efi/ubuntu/grub/grub.cfg", recoveryDir))
+	log.Printf("[create uEnv.txt]")
+	rplib.Shellexec("cp", "-f", "data/uEnv.txt", fmt.Sprintf("%s/uEnv.txt", recoveryDir))
 
 	os.Mkdir(fmt.Sprintf("%s/oemlog", recoveryDir), 0755)
 
@@ -300,6 +274,15 @@ func createRecoveryImage(recoveryNR string, recoveryOutputFile string, buildstam
 	rplib.Shellexec("cp", "-f", gadgetSnap, fmt.Sprintf("%s/gadget.snap", recoveryDir))
 	osSnap := findSnap(fmt.Sprintf("%s/image/writable/system-data/var/lib/snapd/snaps/", tmpDir), configs.Yaml.Snaps.Os)
 	rplib.Shellexec("cp", "-f", osSnap, fmt.Sprintf("%s/os.snap", recoveryDir))
+
+	//Update uEnv.txt for os.snap/kernel.snap
+	log.Printf("[Set os/kernel snap in uEnv.txt]")
+	f, err := os.OpenFile(fmt.Sprintf("%s/uEnv.txt", recoveryDir), os.O_APPEND|os.O_WRONLY, 0644)
+	rplib.Checkerr(err)
+	defer f.Close()
+	_, err = f.WriteString(fmt.Sprintf("snap_core=%s\n", path.Base(osSnap)))
+	_, err = f.WriteString(fmt.Sprintf("snap_kernel=%s\n", path.Base(kernelSnap)))
+	rplib.Checkerr(err)
 
 	log.Printf("[setup initrd.img and vmlinuz]")
 	initrdImagePath := fmt.Sprintf("%s/initrd.img", recoveryDir)
