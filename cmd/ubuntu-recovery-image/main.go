@@ -133,7 +133,7 @@ func createBaseImage() {
 		os.Remove(configs.Yaml.Configs.BaseImage)
 	}
 
-	rplib.Shellexec(configs.Yaml.Udf.Binary, configs.Yaml.Udf.Option, configs.Yaml.Configs.Release,
+	rplib.Shellexec(configs.Yaml.Udf.Binary, configs.Yaml.Udf.Command, configs.Yaml.Configs.Release,
 		configs.Opt.Store, configs.Yaml.Configs.Store,
 		configs.Opt.Device, configs.Yaml.Configs.Device,
 		configs.Opt.Channel, configs.Yaml.Configs.Channel,
